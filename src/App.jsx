@@ -1,9 +1,20 @@
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 
-function XRScene() {
+import {
+  createSmartphone,
+  updateSmartphoneAssembly,
+  disposeSmartphone,
+  smartphoneParts
+} from "./models/smartphone.js";
+
+function XRScene({ progress, selectedId, onSelect }) {
   const containerRef = useRef(null);
+  const apiRef = useRef(null);
+  const callbackRef = useRef(onSelect);
+
+  callbackRef.current = onSelect;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -13,71 +24,129 @@ function XRScene() {
     scene.background = new THREE.Color("#07111f");
 
     const camera = new THREE.PerspectiveCamera(
-      45,
+      38,
       container.clientWidth / container.clientHeight,
       0.1,
       100
     );
 
-    camera.position.set(0, 0, 7);
+    camera.position.set(3.5, 2.3, 7.5);
+    camera.lookAt(0, 0, 0);
 
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: false
     });
 
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.7));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     container.appendChild(renderer.domElement);
 
-    const group = new THREE.Group();
-    scene.add(group);
+    const ambient = new THREE.AmbientLight("#ffffff", 1.8);
+    scene.add(ambient);
 
-    const geometry = new THREE.IcosahedronGeometry(1.35, 2);
+    const keyLight = new THREE.DirectionalLight("#b5eaff", 3);
+    keyLight.position.set(4, 5, 6);
+    scene.add(keyLight);
 
-    const material = new THREE.MeshStandardMaterial({
-      color: "#16baff",
-      metalness: 0.75,
-      roughness: 0.22,
-      wireframe: true
-    });
+    const rimLight = new THREE.PointLight("#00cfff", 28);
+    rimLight.position.set(-4, 1, -2);
+    scene.add(rimLight);
 
-    const object = new THREE.Mesh(geometry, material);
-    group.add(object);
-
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(2, 0.012, 12, 120),
-      new THREE.MeshBasicMaterial({ color: "#00e5ff" })
+    const floor = new THREE.GridHelper(
+      10, 30, "#17425a", "#102c40"
     );
+    floor.position.y = -1.9;
+    scene.add(floor);
 
-    ring.rotation.x = Math.PI / 2.8;
-    group.add(ring);
+    const { root, components } = createSmartphone();
+    scene.add(root);
 
-    scene.add(new THREE.AmbientLight("#ffffff", 1.8));
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
 
-    const light = new THREE.PointLight("#00bfff", 35);
-    light.position.set(3, 4, 5);
-    scene.add(light);
-
-    const clock = new THREE.Clock();
+    let dragging = false;
+    let moved = false;
+    let lastX = 0;
+    let lastY = 0;
     let frameId;
 
-    const animate = () => {
-      frameId = requestAnimationFrame(animate);
-
-      const elapsed = clock.getElapsedTime();
-
-      group.rotation.y = elapsed * 0.25;
-      group.rotation.x = Math.sin(elapsed * 0.3) * 0.12;
-
-      renderer.render(scene, camera);
+    const pointerDown = event => {
+      dragging = true;
+      moved = false;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      renderer.domElement.setPointerCapture(event.pointerId);
     };
 
-    animate();
+    const pointerMove = event => {
+      if (!dragging) return;
 
-    const resize = () => {
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+
+      if (Math.abs(dx) + Math.abs(dy) > 3) {
+        moved = true;
+      }
+
+      if (moved) {
+        root.rotation.y += dx * 0.008;
+        root.rotation.x += dy * 0.005;
+        root.rotation.x = THREE.MathUtils.clamp(
+          root.rotation.x, -1.1, 1.1
+        );
+      }
+
+      lastX = event.clientX;
+      lastY = event.clientY;
+    };
+
+    const pointerUp = event => {
+      if (!dragging) return;
+
+      dragging = false;
+
+      if (!moved) {
+        const rect = renderer.domElement.getBoundingClientRect();
+
+        pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+        raycaster.setFromCamera(pointer, camera);
+
+        const hits = raycaster.intersectObjects(root.children, true);
+
+        if (hits.length) {
+          let object = hits[0].object;
+
+          while (object && !object.userData.componentId) {
+            object = object.parent;
+          }
+
+          if (object?.userData.componentId) {
+            callbackRef.current(object.userData.componentId);
+          }
+        }
+      }
+    };
+
+    const wheel = event => {
+      camera.position.z = THREE.MathUtils.clamp(
+        camera.position.z + event.deltaY * 0.005,
+        4,
+        12
+      );
+    };
+
+    renderer.domElement.addEventListener("pointerdown", pointerDown);
+    renderer.domElement.addEventListener("pointermove", pointerMove);
+    renderer.domElement.addEventListener("pointerup", pointerUp);
+    renderer.domElement.addEventListener("pointercancel", pointerUp);
+    renderer.domElement.addEventListener("wheel", wheel, { passive: true });
+
+    const resizeObserver = new ResizeObserver(() => {
       const width = container.clientWidth;
       const height = container.clientHeight;
 
@@ -86,30 +155,94 @@ function XRScene() {
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+    });
+
+    resizeObserver.observe(container);
+
+    const clock = new THREE.Clock();
+
+    const animate = () => {
+      frameId = requestAnimationFrame(animate);
+
+      if (!dragging) {
+        root.rotation.y += clock.getDelta() * 0.035;
+      } else {
+        clock.getDelta();
+      }
+
+      renderer.render(scene, camera);
     };
 
-    const observer = new ResizeObserver(resize);
-    observer.observe(container);
+    animate();
+
+    apiRef.current = { root, components };
 
     return () => {
       cancelAnimationFrame(frameId);
-      observer.disconnect();
-      geometry.dispose();
-      material.dispose();
-      ring.geometry.dispose();
-      ring.material.dispose();
+      resizeObserver.disconnect();
+
+      renderer.domElement.removeEventListener("pointerdown", pointerDown);
+      renderer.domElement.removeEventListener("pointermove", pointerMove);
+      renderer.domElement.removeEventListener("pointerup", pointerUp);
+      renderer.domElement.removeEventListener("pointercancel", pointerUp);
+      renderer.domElement.removeEventListener("wheel", wheel);
+
+      disposeSmartphone(root);
       renderer.dispose();
 
       if (renderer.domElement.parentNode === container) {
         container.removeChild(renderer.domElement);
       }
+
+      apiRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!apiRef.current) return;
+
+    const { components } = apiRef.current;
+
+    updateSmartphoneAssembly(components, progress);
+
+    components.forEach(component => {
+      component.traverse(object => {
+        if (!object.isMesh || !object.material?.emissive) return;
+
+        const material = object.material;
+
+        if (!material.userData.originalEmissive) {
+          material.userData.originalEmissive =
+            material.emissive.clone();
+        }
+
+        if (component.userData.componentId === selectedId) {
+          material.emissive.set("#00aaff");
+          material.emissiveIntensity = 0.65;
+        } else {
+          material.emissive.copy(material.userData.originalEmissive);
+          material.emissiveIntensity = 0.25;
+        }
+      });
+    });
+  }, [progress, selectedId]);
 
   return <div className="xr-scene" ref={containerRef} />;
 }
 
 export default function App() {
+  const [progress, setProgress] = useState(0);
+  const [selectedId, setSelectedId] = useState("screen");
+  const [language, setLanguage] = useState("es");
+
+  const selected = smartphoneParts.find(
+    part => part.id === selectedId
+  );
+
+  const exploded = progress > 0.05;
+
+  const name = part => language === "es" ? part.es : part.en;
+
   return (
     <main className="app">
       <header className="topbar">
@@ -124,66 +257,169 @@ export default function App() {
         <div className="version">VERSION 2.0</div>
       </header>
 
-      <section className="hero">
-        <div className="hero-copy">
-          <span className="eyebrow">THE NEXT GENERATION OF LEARNING</span>
-
-          <h2>
-            THE FUTURE IS
-            <br />
-            <span>IN YOUR HANDS.</span>
-          </h2>
-
-          <p>
-            Explora, descubre y comprende la tecnología
-            mediante experiencias tridimensionales
-            e interactivas.
-          </p>
-
-          <div className="status">
-            <span className="status-dot" />
-            MOTOR 3D INICIALIZADO
-          </div>
+      <section className="lab-header">
+        <div>
+          <span className="eyebrow">XR COMPONENT LABORATORY / 001</span>
+          <h2>SMARTPHONE <span>EXPLORER</span></h2>
+          <p>Explora la arquitectura interna de un dispositivo móvil.</p>
         </div>
 
-        <div className="visual-panel">
-          <XRScene />
-          <div className="scene-label">
-            <span>XR ENGINE</span>
-            <span>THREE.JS</span>
-          </div>
+        <div className="language-switch">
+          <button
+            className={language === "es" ? "active" : ""}
+            onClick={() => setLanguage("es")}
+          >
+            ES
+          </button>
+          <button
+            className={language === "en" ? "active" : ""}
+            onClick={() => setLanguage("en")}
+          >
+            EN
+          </button>
         </div>
       </section>
 
-      <section className="laboratory">
-        <div className="section-heading">
-          <div>
-            <span className="eyebrow">EXPLORATION MODULES</span>
-            <h2>Laboratorio tecnológico</h2>
+      <section className="workspace">
+        <div className="viewer-column">
+          <div className="viewer-heading">
+            <span>3D INTERACTIVE VIEWER</span>
+            <span className="live-indicator">
+              <i /> LIVE ENGINE
+            </span>
           </div>
-          <span className="module-count">04 MODULES</span>
+
+          <div className="viewer">
+            <XRScene
+              progress={progress}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
+
+            <div className="viewer-hint">
+              ARRASTRA PARA ROTAR · DESPLAZA PARA EXPLORAR
+            </div>
+          </div>
+
+          <div className="assembly-panel">
+            <div className="assembly-heading">
+              <div>
+                <span className="eyebrow">ASSEMBLY CONTROL</span>
+                <h3>{exploded ? "Desensamblado" : "Ensamblado"}</h3>
+              </div>
+
+              <span className="percentage">
+                {Math.round(progress * 100)}%
+              </span>
+            </div>
+
+            <input
+              className="assembly-slider"
+              type="range"
+              min="0"
+              max="100"
+              value={Math.round(progress * 100)}
+              onChange={event =>
+                setProgress(Number(event.target.value) / 100)
+              }
+              aria-label="Nivel de desensamblaje"
+            />
+
+            <div className="assembly-buttons">
+              <button
+                className="primary-button"
+                onClick={() => setProgress(exploded ? 0 : 1)}
+              >
+                {exploded ? "ENSAMBLAR" : "DESENSAMBLAR"}
+              </button>
+
+              <button
+                className="secondary-button"
+                onClick={() => setProgress(0)}
+              >
+                RESTAURAR
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="module-grid">
-          {[
-            ["01", "SMARTPHONE", "Arquitectura de dispositivos móviles"],
-            ["02", "LAPTOP", "Componentes de computadoras"],
-            ["03", "DRONE", "Sistemas de vuelo y sensores"],
-            ["04", "HUMANOID ROBOT", "Robótica e inteligencia artificial"]
-          ].map(([number, name, description]) => (
-            <article className="module-card" key={number}>
-              <span>{number}</span>
-              <h3>{name}</h3>
-              <p>{description}</p>
-              <div className="module-line" />
-            </article>
-          ))}
-        </div>
+        <aside className="components-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">DEVICE ARCHITECTURE</span>
+              <h3>Componentes</h3>
+            </div>
+            <span className="component-count">08</span>
+          </div>
+
+          <div className="component-list">
+            {smartphoneParts.map((part, index) => (
+              <button
+                key={part.id}
+                className={
+                  "component-item " +
+                  (selectedId === part.id ? "selected" : "")
+                }
+                onClick={() => setSelectedId(part.id)}
+              >
+                <span className="component-number">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <span className="component-name">
+                  <strong>{name(part)}</strong>
+                  <small>{part.en}</small>
+                </span>
+                <span className="component-arrow">↗</span>
+              </button>
+            ))}
+          </div>
+
+          {selected && (
+            <div className="info-card">
+              <span className="eyebrow">COMPONENT INFORMATION</span>
+
+              <h3>{name(selected)}</h3>
+
+              <p>
+                {language === "es"
+                  ? selected.description
+                  : selected.descriptionEn}
+              </p>
+
+              <div className="info-detail">
+                <span>FUNCTION</span>
+                <strong>
+                  {language === "es"
+                    ? selected.function
+                    : selected.functionEn}
+                </strong>
+              </div>
+
+              <div className="info-detail">
+                <span>TECHNOLOGY</span>
+                <strong>
+                  {language === "es"
+                    ? selected.technical
+                    : selected.technicalEn}
+                </strong>
+              </div>
+
+              <div className="info-detail">
+                <span>CONNECTION</span>
+                <strong>
+                  {language === "es"
+                    ? selected.relation
+                    : selected.relationEn}
+                </strong>
+              </div>
+            </div>
+          )}
+        </aside>
       </section>
 
       <footer>
         <span>FUTURE VISION XR 2.0</span>
-        <span>EDUCATION · TECHNOLOGY · INNOVATION</span>
+        <span>THE FUTURE IS IN YOUR HANDS.</span>
       </footer>
     </main>
   );
